@@ -150,6 +150,9 @@ local S = {
     DanceTrack = nil, DanceAnimObj = nil,
     AntiExploiterOn = false, AntiExploiterForce = 3,
     FlickOn = false, FlickSmoothness = 0.9, FlickLastShot = 0, FlickShotCD = 2,
+    TriggerOn = false, TriggerCD = 0.03, TriggerLastShot = 0,
+    AimbotOn = false, AimbotFOV = 200, AimbotShowFOV = false,
+    AimbotSmoothness = 0.35,
 }
 
 local AnchorRelease = false
@@ -219,6 +222,157 @@ local function isTeammate(other)
     end
     return false
 end
+
+-- ============================================================
+-- SIMPLE AIMBOT + FOV CIRCLE
+-- ============================================================
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name = "SealDevFOV"
+fovGui.ResetOnSpawn = false
+fovGui.IgnoreGuiInset = true
+fovGui.DisplayOrder = 5
+fovGui.Parent = CoreGuiRef
+
+local fovCircle = Instance.new("Frame")
+fovCircle.Name = "FOVCircle"
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.Position = UDim2.new(0.5, 0, 0.5, 0)
+fovCircle.Size = UDim2.new(0, S.AimbotFOV * 2, 0, S.AimbotFOV * 2)
+fovCircle.BackgroundTransparency = 1
+fovCircle.BorderSizePixel = 0
+fovCircle.Visible = false
+fovCircle.Parent = fovGui
+
+local fovStroke = Instance.new("UIStroke")
+fovStroke.Color = Color3.fromRGB(255, 255, 255)
+fovStroke.Thickness = 1.5
+fovStroke.Transparency = 0.3
+fovStroke.Parent = fovCircle
+
+local fovAspect = Instance.new("UIAspectRatioConstraint")
+fovAspect.AspectRatio = 1
+fovAspect.Parent = fovCircle
+
+local fovCorner = Instance.new("UICorner")
+fovCorner.CornerRadius = UDim.new(1, 0)
+fovCorner.Parent = fovCircle
+
+local function updateFovCircle()
+    fovCircle.Size = UDim2.new(0, S.AimbotFOV * 2, 0, S.AimbotFOV * 2)
+    fovCircle.Visible = S.AimbotShowFOV and S.AimbotOn
+end
+updateFovCircle()
+
+local function getClosestEnemyInFOV()
+    local cam = WorkspaceService.CurrentCamera
+    if not cam then return nil end
+    local myChar = MyPlayer.Character
+    if not myChar then return nil end
+    local centerPoint = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local closest = nil
+    local minDist = S.AimbotFOV + 1
+    for _, o in ipairs(S.EnemyList) do
+        if not isTeammate(o) and o.Character then
+            local head = o.Character:FindFirstChild("Head")
+            local hp = o.Character:FindFirstChildOfClass("Humanoid")
+            if head and hp and hp.Health > 0 then
+                local screenPt, onScreen = cam:WorldToScreenPoint(head.Position)
+                if onScreen then
+                    local dist = (Vector2.new(screenPt.X, screenPt.Y) - centerPoint).Magnitude
+                    if dist < minDist then
+                        minDist = dist
+                        closest = head
+                    end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+RunServiceRef.RenderStepped:Connect(function()
+    if not S.AimbotOn or S.GuiHidden or not S.InMatch then return end
+    local rmb = UserInputServiceRef:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    if not rmb then return end
+    local target = getClosestEnemyInFOV()
+    if not target then return end
+    local cam = WorkspaceService.CurrentCamera
+    if not cam then return end
+    local goal = CFrame.new(cam.CFrame.Position, target.Position)
+    cam.CFrame = cam.CFrame:Lerp(goal, S.AimbotSmoothness)
+end)
+
+-- ============================================================
+-- TRIGGERBOT — real mouse click via VirtualInputManager
+-- First-person only. Aggressive.
+-- ============================================================
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local function isFirstPerson()
+    local cam = WorkspaceService.CurrentCamera
+    if not cam then return false end
+    local myChar = MyPlayer.Character
+    if not myChar then return false end
+    local head = myChar:FindFirstChild("Head")
+    if not head then return false end
+    local dist = (cam.CFrame.Position - head.Position).Magnitude
+    return dist < 1.2
+end
+
+local function simulateMouseClick()
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+        task.wait(0.01)
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+    end)
+    pcall(function()
+        VirtualUserService:CaptureController()
+        VirtualUserService:ClickButton1(Vector2.new())
+    end)
+end
+
+local triggerBusy = false
+task.spawn(function()
+    while task.wait(0.01) do
+        if S.TriggerOn and not S.GuiHidden and S.InMatch and not triggerBusy then
+            if isFirstPerson() then
+                local now = tick()
+                if now - S.TriggerLastShot >= S.TriggerCD then
+                    local cam = WorkspaceService.CurrentCamera
+                    local myChar = MyPlayer.Character
+                    if cam and myChar then
+                        local myHead = myChar:FindFirstChild("Head")
+                        local tool = myChar:FindFirstChildOfClass("Tool")
+                        if myHead and tool and tool:FindFirstChild("Fire") and tool:FindFirstChild("Reload") then
+                            local mousePos = UserInputServiceRef:GetMouseLocation()
+                            local ray = cam:ViewportPointToRay(mousePos.X, mousePos.Y)
+                            local rayParams = RaycastParams.new()
+                            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                            rayParams.FilterDescendantsInstances = { myChar }
+                            rayParams.IgnoreWater = true
+                            local result = WorkspaceService:Raycast(ray.Origin, ray.Direction * 3000, rayParams)
+                            if result then
+                                local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
+                                if hitChar then
+                                    local hitPlayer = PlayersService:GetPlayerFromCharacter(hitChar)
+                                    if hitPlayer and hitPlayer ~= MyPlayer and not isTeammate(hitPlayer) then
+                                        local hp = hitChar:FindFirstChildOfClass("Humanoid")
+                                        if hp and hp.Health > 0 then
+                                            triggerBusy = true
+                                            simulateMouseClick()
+                                            S.TriggerLastShot = now
+                                            task.delay(0.02, function() triggerBusy = false end)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
 
 MyPlayer.CharacterAdded:Connect(function(body)
     if not AnchorRelease then return end
@@ -303,31 +457,29 @@ task.spawn(function()
 end)
 
 local CD_KEYS = { "Cooldown", "FireRate", "FireCooldown", "ReloadCooldown", "ReloadTime" }
-local function WipeCD(t)
+local function WipeCD(t, saves)
     for _, k in ipairs(CD_KEYS) do
         if t:GetAttribute(k) ~= nil then
             local tag = tostring(t) .. "@" .. k
-            if S.CooldownSaves[tag] == nil then
-                S.CooldownSaves[tag] = { obj = t, key = k, val = t:GetAttribute(k) }
+            if saves[tag] == nil then
+                saves[tag] = { obj = t, key = k, val = t:GetAttribute(k) }
             end
             pcall(function() t:SetAttribute(k, 0) end)
         end
     end
 end
-local function RestoreCD()
-    for _, e in pairs(S.CooldownSaves) do
+local function RestoreSaves(saves)
+    for _, e in pairs(saves) do
         if e.obj and e.obj.Parent then pcall(function() e.obj:SetAttribute(e.key, e.val) end) end
     end
-    S.CooldownSaves = {}
 end
-
 task.spawn(function()
     while task.wait(0.25) do
         if S.CooldownOff and not S.GuiHidden then
             for _, c in ipairs({ MyPlayer:FindFirstChildOfClass("Backpack"), MyPlayer.Character }) do
                 if c then
                     for _, i in ipairs(c:GetChildren()) do
-                        if i:IsA("Tool") and i:FindFirstChild("Fire") then WipeCD(i) end
+                        if i:IsA("Tool") and i:FindFirstChild("Fire") then WipeCD(i, S.CooldownSaves) end
                     end
                 end
             end
@@ -374,23 +526,22 @@ NameFolder.Name = "SealDevInfo"; NameFolder.Parent = CoreGuiRef
 local HitboxFolder = CoreGuiRef:FindFirstChild("SealDevHitbox") or Instance.new("Folder")
 HitboxFolder.Name = "SealDevHitbox"; HitboxFolder.Parent = CoreGuiRef
 
+-- FLICK MODE
 local flickBindName = "SealDevFlick"
 pcall(function() RunServiceRef:UnbindFromRenderStep(flickBindName) end)
 
 local shiftlockFrames = 0
 local SHIFTLOCK_REQUIRED_FRAMES = 3
-
 local flickState = "idle"
 local flickOriginalCF = nil
+local flickOriginalHRP = nil
 local flickReturnProgress = 0
 local flickAimFrames = 0
-local flickPauseTimer = 0
 local flickOvershootTarget = nil
 local flickOvershootDone = false
 local flickWobblePhase = 0
 local flickWobbleSpeed = 0
 local flickWobbleAmp = 0
-local flickLastTargetPos = nil
 
 local function checkShiftlockRaw()
     local mb = UserInputServiceRef.MouseBehavior
@@ -418,11 +569,6 @@ local function checkShiftlockRaw()
     return true
 end
 
-local function smoothstep(t)
-    t = math.clamp(t, 0, 1)
-    return t * t * (3 - 2 * t)
-end
-
 local function easeOutCubic(t)
     t = math.clamp(t, 0, 1)
     return 1 - (1 - t) ^ 3
@@ -441,46 +587,46 @@ end
 
 RunServiceRef:BindToRenderStep(flickBindName, Enum.RenderPriority.Camera.Value + 1, function()
     if not S.FlickOn or S.GuiHidden or not S.InMatch then
+        if flickState == "aiming" or flickState == "returning" then
+            local char = MyPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.AutoRotate = true end
+        end
         shiftlockFrames = 0
         flickState = "idle"
         flickOriginalCF = nil
+        flickOriginalHRP = nil
         return
     end
-
     if checkShiftlockRaw() then
         shiftlockFrames = math.min(shiftlockFrames + 1, SHIFTLOCK_REQUIRED_FRAMES)
     else
         shiftlockFrames = 0
     end
-
     local cam = WorkspaceService.CurrentCamera
     if not cam then return end
-
     local shiftlockOk = shiftlockFrames >= SHIFTLOCK_REQUIRED_FRAMES
     local rmb = UserInputServiceRef:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-
+    local myChar = MyPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+    local myHead = myChar and myChar:FindFirstChild("Head")
     local bestHead = nil
-    if shiftlockOk and rmb then
-        local myChar = MyPlayer.Character
-        if myChar then
-            local myHead = myChar:FindFirstChild("Head")
-            if myHead then
-                local bestDist = math.huge
-                local camPos = cam.CFrame.Position
-                for _, other in ipairs(S.EnemyList) do
-                    if not isTeammate(other) then
-                        local char = other.Character
-                        if char then
-                            local head = char:FindFirstChild("Head")
-                            local hp = char:FindFirstChildOfClass("Humanoid")
-                            if head and hp and hp.Health > 0 then
-                                local d = (head.Position - camPos).Magnitude
-                                if d < bestDist then
-                                    if hasClearLOS(myHead, char) then
-                                        bestDist = d
-                                        bestHead = head
-                                    end
-                                end
+    if shiftlockOk and rmb and myChar and myHRP and myHum and myHead then
+        local bestDist = math.huge
+        local camPos = cam.CFrame.Position
+        for _, other in ipairs(S.EnemyList) do
+            if not isTeammate(other) then
+                local char = other.Character
+                if char then
+                    local head = char:FindFirstChild("Head")
+                    local hp = char:FindFirstChildOfClass("Humanoid")
+                    if head and hp and hp.Health > 0 then
+                        local d = (head.Position - camPos).Magnitude
+                        if d < bestDist then
+                            if hasClearLOS(myHead, char) then
+                                bestDist = d
+                                bestHead = head
                             end
                         end
                     end
@@ -488,84 +634,80 @@ RunServiceRef:BindToRenderStep(flickBindName, Enum.RenderPriority.Camera.Value +
             end
         end
     end
-
-    if bestHead and shiftlockOk and rmb then
+    if bestHead and shiftlockOk and rmb and myHRP and myHum and myHead then
         if flickState ~= "aiming" then
             if flickState == "idle" or not flickOriginalCF then
                 flickOriginalCF = cam.CFrame
+                flickOriginalHRP = myHRP.CFrame
             end
             flickAimFrames = 0
-            flickPauseTimer = 0
             flickOvershootTarget = nil
             flickOvershootDone = false
             flickWobblePhase = math.random() * math.pi * 2
             flickWobbleSpeed = 0.15 + math.random() * 0.15
             flickWobbleAmp = 0.0015 + math.random() * 0.002
+            myHum.AutoRotate = false
         end
         flickState = "aiming"
         flickAimFrames = flickAimFrames + 1
         flickWobblePhase = flickWobblePhase + flickWobbleSpeed
-
         local camPos = cam.CFrame.Position
-        local distToTarget = (camPos - bestHead.Position).Magnitude
-
+        local hrpPos = myHRP.Position
+        local targetPos = bestHead.Position
+        local distToTarget = (camPos - targetPos).Magnitude
         if flickAimFrames <= 2 then
+            local flatTarget = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
+            myHRP.CFrame = CFrame.lookAt(hrpPos, flatTarget)
             return
         end
-
         if not flickOvershootTarget and not flickOvershootDone then
             if distToTarget > 30 then
                 local overAmount = 1 + (0.005 + math.random() * 0.01)
-                local dir = (bestHead.Position - camPos)
+                local dir = (targetPos - camPos)
                 flickOvershootTarget = CFrame.new(camPos, camPos + dir * overAmount)
             else
                 flickOvershootDone = true
             end
         end
-
         local targetCF
         if flickOvershootTarget and not flickOvershootDone then
             targetCF = flickOvershootTarget
         else
-            targetCF = CFrame.new(camPos, bestHead.Position)
+            targetCF = CFrame.new(camPos, targetPos)
         end
-
         local speedCurve
         if flickAimFrames <= 12 then
             speedCurve = easeOutCubic(flickAimFrames / 12)
         else
             speedCurve = 1
         end
-
         local alpha = S.FlickSmoothness * speedCurve
         local currentWobble = flickWobbleAmp * (1 - math.min(flickAimFrames / 30, 0.8))
-
+        local flatTarget = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
+        local bodyGoalCF = CFrame.lookAt(hrpPos, flatTarget)
+        myHRP.CFrame = myHRP.CFrame:Lerp(bodyGoalCF, math.clamp(alpha * 1.4, 0, 1))
         cam.CFrame = humanLerp(cam.CFrame, targetCF, alpha, flickWobblePhase, currentWobble)
-
         if flickOvershootTarget and not flickOvershootDone then
             local curLook = cam.CFrame.LookVector
-            local realDir = (bestHead.Position - cam.CFrame.Position).Unit
+            local realDir = (targetPos - cam.CFrame.Position).Unit
             if curLook:Dot(realDir) > 0.995 then
                 flickOvershootDone = true
             end
         end
-
         local now = tick()
         local jitterCD = S.FlickShotCD * (0.85 + math.random() * 0.3)
         if now - S.FlickLastShot >= jitterCD then
-            local myChar = MyPlayer.Character
-            local tool = myChar and myChar:FindFirstChildOfClass("Tool")
+            local tool = myChar:FindFirstChildOfClass("Tool")
             if tool and tool:FindFirstChild("Fire") and tool:FindFirstChild("Reload") then
                 local sg = RemoteFolder and RemoteFolder:FindFirstChild("ShootGun")
                 if sg then
-                    local myHead = myChar:FindFirstChild("Head")
-                    local origin = myHead and myHead.Position or camPos
+                    local origin = myHead.Position
                     local offset = Vector3.new(
                         (math.random() - 0.5) * 0.05,
                         (math.random() - 0.5) * 0.05,
                         (math.random() - 0.5) * 0.05
                     )
-                    local shotPos = bestHead.Position + offset
+                    local shotPos = targetPos + offset
                     pcall(function()
                         sg:FireServer(origin, shotPos, bestHead, shotPos)
                     end)
@@ -577,25 +719,33 @@ RunServiceRef:BindToRenderStep(flickBindName, Enum.RenderPriority.Camera.Value +
         flickState = "returning"
         flickReturnProgress = 0
         flickOriginalCF = flickOriginalCF or cam.CFrame
+        flickOriginalHRP = flickOriginalHRP or (myHRP and myHRP.CFrame)
     end
-
-    if flickState == "returning" and flickOriginalCF then
+    if flickState == "returning" then
         flickReturnProgress = math.min(flickReturnProgress + 0.07, 1)
         local eased = easeOutCubic(flickReturnProgress)
-        cam.CFrame = cam.CFrame:Lerp(flickOriginalCF, eased)
+        if flickOriginalCF then
+            cam.CFrame = cam.CFrame:Lerp(flickOriginalCF, eased)
+        end
+        if flickOriginalHRP and myHRP then
+            myHRP.CFrame = myHRP.CFrame:Lerp(flickOriginalHRP, eased)
+        end
         if flickReturnProgress >= 1 then
             flickState = "idle"
             flickOriginalCF = nil
+            flickOriginalHRP = nil
+            local hum = MyPlayer.Character and MyPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.AutoRotate = true end
         end
     end
 end)
 
+-- FLAGS
 local boostedAnimators = setmetatable({}, { __mode = "k" })
 local boostedParticles = setmetatable({}, { __mode = "k" })
 local savedAnimSpeeds  = setmetatable({}, { __mode = "k" })
 local replacedJumpSounds = setmetatable({}, { __mode = "k" })
 local flagsWatchers = {}
-
 local function looksLikeJumpSound(o)
     if not o:IsA("Sound") then return false end
     local c = o:GetAttribute("SealDevJump")
@@ -615,7 +765,6 @@ local function looksLikeJumpSound(o)
     pcall(function() o:SetAttribute("SealDevJump", r) end)
     return r
 end
-
 local function boostAnimator(a)
     if boostedAnimators[a] then return end
     boostedAnimators[a] = a.AnimationPlayed:Connect(function(tr)
@@ -628,7 +777,6 @@ local function boostAnimator(a)
         pcall(function() tr.Speed = FLAGS_MULTIPLIER end)
     end
 end
-
 local function boostParticle(p)
     local m = FLAGS_MULTIPLIER
     if boostedParticles[p] then
@@ -648,7 +796,6 @@ local function boostParticle(p)
         p.Lifetime = NumberRange.new(o.lMin / m, o.lMax / m)
     end)
 end
-
 local function replaceJumpSound(o)
     if not o or not o.Parent or not looksLikeJumpSound(o) then return end
     if replacedJumpSounds[o] == nil then
@@ -659,33 +806,27 @@ local function replaceJumpSound(o)
         o:SetAttribute("SealDevJump", true)
     end)
 end
-
 local function scanJumpSounds(r)
     if not r then return end
     for _, o in ipairs(r:GetDescendants()) do
         if o:IsA("Sound") and looksLikeJumpSound(o) then replaceJumpSound(o) end
     end
 end
-
 local function watch(c) table.insert(flagsWatchers, c); return c end
-
 local function flagsStart()
     if MyPlayer.Character then scanJumpSounds(MyPlayer.Character) end
     for _, p in ipairs(PlayersService:GetPlayers()) do if p.Character then scanJumpSounds(p.Character) end end
-
     watch(WorkspaceService.DescendantAdded:Connect(function(o)
         if not S.FlagsOn then return end
         if o:IsA("Animator") then boostAnimator(o)
         elseif o:IsA("ParticleEmitter") then boostParticle(o)
         elseif o:IsA("Sound") and looksLikeJumpSound(o) then replaceJumpSound(o) end
     end))
-
     watch(MyPlayer.CharacterAdded:Connect(function(c)
         task.wait(0.5); if not S.FlagsOn then return end
         scanJumpSounds(c)
         local a = c:FindFirstChildOfClass("Animator"); if a then boostAnimator(a) end
     end))
-
     for _, p in ipairs(PlayersService:GetPlayers()) do
         watch(p.CharacterAdded:Connect(function(c)
             task.wait(0.5); if not S.FlagsOn then return end
@@ -693,7 +834,6 @@ local function flagsStart()
             local a = c:FindFirstChildOfClass("Animator"); if a then boostAnimator(a) end
         end))
     end
-
     watch(PlayersService.PlayerAdded:Connect(function(p)
         p.CharacterAdded:Connect(function(c)
             task.wait(0.5); if not S.FlagsOn then return end
@@ -701,13 +841,11 @@ local function flagsStart()
             local a = c:FindFirstChildOfClass("Animator"); if a then boostAnimator(a) end
         end)
     end))
-
     for _, o in ipairs(WorkspaceService:GetDescendants()) do
         if o:IsA("Animator") then boostAnimator(o)
         elseif o:IsA("ParticleEmitter") then boostParticle(o)
         elseif o:IsA("Sound") and looksLikeJumpSound(o) then replaceJumpSound(o) end
     end
-
     task.spawn(function()
         while S.FlagsOn do
             task.wait(1)
@@ -722,7 +860,6 @@ local function flagsStart()
         end
     end)
 end
-
 local function flagsStop()
     for _, c in ipairs(flagsWatchers) do pcall(function() c:Disconnect() end) end
     flagsWatchers = {}
@@ -753,6 +890,7 @@ local function flagsStop()
     replacedJumpSounds = setmetatable({}, { __mode = "k" })
 end
 
+-- MAIN
 local MainPage = Hub:Tab({ Title = "Main", Icon = "layout-dashboard", Locked = false })
 
 MainPage:Button({
@@ -788,8 +926,14 @@ MainPage:Toggle({
     Title = "No Gun Cooldown", Default = false,
     Callback = function(v)
         S.CooldownOff = v
-        if v then S.CooldownSaves = {}; Notify("Cooldown stripper ON")
-        else RestoreCD(); Notify("Cooldown stripper OFF") end
+        if v then
+            S.CooldownSaves = {}
+            Notify("Gun cooldown stripper ON")
+        else
+            RestoreSaves(S.CooldownSaves)
+            S.CooldownSaves = {}
+            Notify("Gun cooldown stripper OFF")
+        end
     end,
 })
 
@@ -866,109 +1010,7 @@ task.spawn(function()
     end
 end)
 
-local farmGroups = { DuelRing_1v1 = 1, DuelRing_2v2 = 2, DuelRing_3v3 = 3, DuelRing_4v4 = 4 }
-local farmLobby, lastJumpTime, currentFarmPad
-
-local function getLobby()
-    if farmLobby and farmLobby.Parent then return farmLobby end
-    farmLobby = WorkspaceService:FindFirstChild("Lobby")
-    return farmLobby
-end
-
-local function farmFindPad()
-    local lobby = getLobby(); if not lobby then return nil end
-    local dg = lobby:FindFirstChild("DuelRingsGroup"); if not dg then return nil end
-    for g, mps in pairs(farmGroups) do
-        local rf = dg:FindFirstChild(g)
-        if rf then
-            local tp, mp = 0, mps * 2
-            local fp = {}
-            for _, mo in ipairs(rf:GetChildren()) do
-                if mo:IsA("Model") and mo.Name == "DuelPad" and mo.PrimaryPart then
-                    local c = mo:GetAttribute("CharacterCount") or 0
-                    tp = tp + c
-                    if c < mps then table.insert(fp, { model = mo, count = c }) end
-                end
-            end
-            if tp == mp - 1 and #fp > 0 then
-                table.sort(fp, function(a, b) return a.count < b.count end)
-                return fp[1].model
-            end
-        end
-    end
-    local o = dg:FindFirstChild("DuelRing_1v1")
-    if o then
-        for _, mo in ipairs(o:GetChildren()) do
-            if mo:IsA("Model") and mo.Name == "DuelPad" and mo.PrimaryPart then
-                if (mo:GetAttribute("CharacterCount") or 0) == 0 then return mo end
-            end
-        end
-    end
-end
-
-local function farmWalkTo(mo)
-    if not mo or not mo.PrimaryPart then return false end
-    local c = MyPlayer.Character; if not c then return false end
-    local h = c:FindFirstChildOfClass("Humanoid")
-    local r = c:FindFirstChild("HumanoidRootPart")
-    if not h or not r then return false end
-    local t = mo.PrimaryPart.Position
-    if (r.Position - t).Magnitude <= 6 then
-        for _, p in ipairs(c:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = true end
-        end
-        return true
-    end
-    h.WalkSpeed = S.FarmWalkSpeed
-    h:MoveTo(t)
-    if os.clock() - (lastJumpTime or 0) >= 2 then
-        pcall(function() h.Jump = true end)
-        lastJumpTime = os.clock()
-    end
-    for _, p in ipairs(c:GetDescendants()) do
-        if p:IsA("BasePart") then p.CanCollide = false end
-    end
-    return false
-end
-
-task.spawn(function()
-    while task.wait(0.15) do
-        if S.FarmOn and not S.GuiHidden then
-            if S.InMatch then
-                currentFarmPad = nil
-                if tick() - S.LastDance >= 2 then playDance(); S.LastDance = tick() end
-                EquipTool(FindKnife())
-                for _, o in ipairs(S.EnemyList) do
-                    if not isTeammate(o) then
-                        local c = o.Character
-                        if c then
-                            local h = c:FindFirstChildOfClass("Humanoid")
-                            if h and h.Health > 0 then
-                                ThrowKnife(c)
-                                task.wait(0.001)
-                            end
-                        end
-                    end
-                end
-            else
-                if S.DanceTrack then stopDance() end
-                if not currentFarmPad or not currentFarmPad.Parent then
-                    currentFarmPad = farmFindPad()
-                end
-                if currentFarmPad then farmWalkTo(currentFarmPad) end
-            end
-        end
-    end
-end)
-
-task.spawn(function()
-    while task.wait(0.5) do
-        if S.FarmOn and S.InMatch and not S.GuiHidden then
-            if not S.DanceTrack or not S.DanceTrack.IsPlaying then playDance() end
-        end
-    end
-end)
-
+-- KILL ALL
 local KillPage = Hub:Tab({ Title = "Kill All", Icon = "skull", Locked = false })
 
 KillPage:Button({
@@ -1017,8 +1059,70 @@ KillPage:Toggle({
     end,
 })
 
-local FarmPage = Hub:Tab({ Title = "Farm", Icon = "wheat", Locked = false })
+-- FARM
+local farmGroups = { DuelRing_1v1 = 1, DuelRing_2v2 = 2, DuelRing_3v3 = 3, DuelRing_4v4 = 4 }
+local farmLobby, lastJumpTime, currentFarmPad
+local function getLobby()
+    if farmLobby and farmLobby.Parent then return farmLobby end
+    farmLobby = WorkspaceService:FindFirstChild("Lobby")
+    return farmLobby
+end
+local function farmFindPad()
+    local lobby = getLobby(); if not lobby then return nil end
+    local dg = lobby:FindFirstChild("DuelRingsGroup"); if not dg then return nil end
+    for g, mps in pairs(farmGroups) do
+        local rf = dg:FindFirstChild(g)
+        if rf then
+            local tp, mp = 0, mps * 2
+            local fp = {}
+            for _, mo in ipairs(rf:GetChildren()) do
+                if mo:IsA("Model") and mo.Name == "DuelPad" and mo.PrimaryPart then
+                    local c = mo:GetAttribute("CharacterCount") or 0
+                    tp = tp + c
+                    if c < mps then table.insert(fp, { model = mo, count = c }) end
+                end
+            end
+            if tp == mp - 1 and #fp > 0 then
+                table.sort(fp, function(a, b) return a.count < b.count end)
+                return fp[1].model
+            end
+        end
+    end
+    local o = dg:FindFirstChild("DuelRing_1v1")
+    if o then
+        for _, mo in ipairs(o:GetChildren()) do
+            if mo:IsA("Model") and mo.Name == "DuelPad" and mo.PrimaryPart then
+                if (mo:GetAttribute("CharacterCount") or 0) == 0 then return mo end
+            end
+        end
+    end
+end
+local function farmWalkTo(mo)
+    if not mo or not mo.PrimaryPart then return false end
+    local c = MyPlayer.Character; if not c then return false end
+    local h = c:FindFirstChildOfClass("Humanoid")
+    local r = c:FindFirstChild("HumanoidRootPart")
+    if not h or not r then return false end
+    local t = mo.PrimaryPart.Position
+    if (r.Position - t).Magnitude <= 6 then
+        for _, p in ipairs(c:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = true end
+        end
+        return true
+    end
+    h.WalkSpeed = S.FarmWalkSpeed
+    h:MoveTo(t)
+    if os.clock() - (lastJumpTime or 0) >= 2 then
+        pcall(function() h.Jump = true end)
+        lastJumpTime = os.clock()
+    end
+    for _, p in ipairs(c:GetDescendants()) do
+        if p:IsA("BasePart") then p.CanCollide = false end
+    end
+    return false
+end
 
+local FarmPage = Hub:Tab({ Title = "Farm", Icon = "wheat", Locked = false })
 FarmPage:Toggle({
     Title = "Auto Farm", Desc = "Pad + walk + auto-kill + dance + anti-afk", Default = false,
     Callback = function(v)
@@ -1032,15 +1136,50 @@ FarmPage:Toggle({
         end
     end,
 })
-
 FarmPage:Slider({
     Title = "Walk Speed to Pad", Step = 1,
     Value = { Min = 16, Max = 100, Default = 40 },
     Callback = function(v) S.FarmWalkSpeed = v end,
 })
+task.spawn(function()
+    while task.wait(0.15) do
+        if S.FarmOn and not S.GuiHidden then
+            if S.InMatch then
+                currentFarmPad = nil
+                if tick() - S.LastDance >= 2 then playDance(); S.LastDance = tick() end
+                EquipTool(FindKnife())
+                for _, o in ipairs(S.EnemyList) do
+                    if not isTeammate(o) then
+                        local c = o.Character
+                        if c then
+                            local h = c:FindFirstChildOfClass("Humanoid")
+                            if h and h.Health > 0 then
+                                ThrowKnife(c)
+                                task.wait(0.001)
+                            end
+                        end
+                    end
+                end
+            else
+                if S.DanceTrack then stopDance() end
+                if not currentFarmPad or not currentFarmPad.Parent then
+                    currentFarmPad = farmFindPad()
+                end
+                if currentFarmPad then farmWalkTo(currentFarmPad) end
+            end
+        end
+    end
+end)
+task.spawn(function()
+    while task.wait(0.5) do
+        if S.FarmOn and S.InMatch and not S.GuiHidden then
+            if not S.DanceTrack or not S.DanceTrack.IsPlaying then playDance() end
+        end
+    end
+end)
 
+-- ESP
 local EspPage = Hub:Tab({ Title = "ESP", Icon = "eye", Locked = false })
-
 EspPage:Toggle({
     Title = "Chams", Default = false,
     Callback = function(v)
@@ -1070,7 +1209,6 @@ EspPage:Toggle({
         end)
     end,
 })
-
 EspPage:Toggle({
     Title = "Names", Default = false,
     Callback = function(v)
@@ -1112,7 +1250,6 @@ EspPage:Toggle({
         end)
     end,
 })
-
 local TracerConn
 EspPage:Toggle({
     Title = "Tracers", Default = false,
@@ -1144,7 +1281,6 @@ EspPage:Toggle({
         end)
     end,
 })
-
 EspPage:Colorpicker({
     Title = "Teammate Color", Default = Color3.fromRGB(255, 255, 255), Transparency = 0,
     Callback = function(c) S.MateColor = c end,
@@ -1154,8 +1290,8 @@ EspPage:Colorpicker({
     Callback = function(c) S.FoeColor = c end,
 })
 
+-- MOVEMENT
 local MovePage = Hub:Tab({ Title = "Movement", Icon = "footprints", Locked = false })
-
 MovePage:Toggle({
     Title = "Noclip", Default = false,
     Callback = function(v)
@@ -1175,7 +1311,6 @@ MovePage:Toggle({
         end
     end,
 })
-
 MovePage:Toggle({
     Title = "Speed Changer", Default = false,
     Callback = function(v)
@@ -1194,15 +1329,83 @@ MovePage:Toggle({
         end
     end,
 })
-
 MovePage:Slider({
     Title = "Walk Speed", Step = 1,
     Value = { Min = 16, Max = 250, Default = 16 },
     Callback = function(v) S.SpeedValue = v end,
 })
 
-local MiscPage = Hub:Tab({ Title = "Misc", Icon = "wrench", Locked = false })
+-- FLICK
+local FlickPage = Hub:Tab({ Title = "Flick", Icon = "crosshair", Locked = false })
+FlickPage:Toggle({
+    Title = "Flick Mode",
+    Desc = "Shiftlock + RMB → full body + camera flick + auto-shoot",
+    Default = false,
+    Callback = function(v)
+        S.FlickOn = v
+        Notify(v and "Flick Mode ON" or "Flick Mode OFF")
+    end,
+})
+FlickPage:Slider({
+    Title = "Flick Smoothness", Step = 0.05,
+    Value = { Min = 0.1, Max = 1, Default = 0.9 },
+    Callback = function(v) S.FlickSmoothness = v end,
+})
 
+-- AIMBOT (with TriggerBot merged in)
+local AimbotPage = Hub:Tab({ Title = "Aimbot", Icon = "crosshair", Locked = false })
+
+AimbotPage:Section({ Title = "Aimbot" })
+AimbotPage:Toggle({
+    Title = "Aimbot (RMB)",
+    Desc = "Hold RMB to lock camera onto nearest enemy inside FOV",
+    Default = false,
+    Callback = function(v)
+        S.AimbotOn = v
+        updateFovCircle()
+        Notify(v and "Aimbot ON" or "Aimbot OFF")
+    end,
+})
+AimbotPage:Slider({
+    Title = "Aimbot FOV", Step = 1,
+    Value = { Min = 65, Max = 1000, Default = 200 },
+    Callback = function(v)
+        S.AimbotFOV = v
+        updateFovCircle()
+    end,
+})
+AimbotPage:Slider({
+    Title = "Aimbot Smoothness", Step = 0.01,
+    Value = { Min = 0.05, Max = 1, Default = 0.35 },
+    Callback = function(v) S.AimbotSmoothness = v end,
+})
+AimbotPage:Toggle({
+    Title = "Show FOV Circle",
+    Default = false,
+    Callback = function(v)
+        S.AimbotShowFOV = v
+        updateFovCircle()
+    end,
+})
+
+AimbotPage:Section({ Title = "TriggerBot" })
+AimbotPage:Toggle({
+    Title = "TriggerBot",
+    Desc = "First-person only. Simulates real mouse click when crosshair is on enemy",
+    Default = false,
+    Callback = function(v)
+        S.TriggerOn = v
+        Notify(v and "TriggerBot ON (first-person)" or "TriggerBot OFF")
+    end,
+})
+AimbotPage:Slider({
+    Title = "TriggerBot Cooldown", Step = 0.005,
+    Value = { Min = 0.01, Max = 0.5, Default = 0.03 },
+    Callback = function(v) S.TriggerCD = v end,
+})
+
+-- MISC
+local MiscPage = Hub:Tab({ Title = "Misc", Icon = "wrench", Locked = false })
 MiscPage:Toggle({
     Title = "Flags", Desc = "Kill Effect Speed x4.5 + custom jump sound", Default = false,
     Callback = function(v)
@@ -1211,7 +1414,6 @@ MiscPage:Toggle({
         else flagsStop(); Notify("Flags OFF") end
     end,
 })
-
 MiscPage:Toggle({
     Title = "Anti-Exploiter",
     Desc = "Random position shifts to break enemy hit-reg (match only)",
@@ -1221,33 +1423,14 @@ MiscPage:Toggle({
         Notify(v and "Anti-Exploiter ON" or "Anti-Exploiter OFF")
     end,
 })
-
 MiscPage:Slider({
-    Title = "Anti-Exploiter Force (studs)",
-    Step = 0.5,
+    Title = "Anti-Exploiter Force (studs)", Step = 0.5,
     Value = { Min = 1, Max = 8, Default = 3 },
     Callback = function(v) S.AntiExploiterForce = v end,
 })
 
-MiscPage:Toggle({
-    Title = "Flick Mode",
-    Desc = "Shiftlock + RMB → human-like flick + auto-return",
-    Default = false,
-    Callback = function(v)
-        S.FlickOn = v
-        Notify(v and "Flick Mode ON" or "Flick Mode OFF")
-    end,
-})
-
-MiscPage:Slider({
-    Title = "Flick Smoothness",
-    Step = 0.05,
-    Value = { Min = 0.1, Max = 1, Default = 0.9 },
-    Callback = function(v) S.FlickSmoothness = v end,
-})
-
+-- J PANIC
 local savedGuiStates = {}
-
 local function GatherGuis()
     local l = {}
     for _, o in ipairs(CoreGuiRef:GetDescendants()) do
@@ -1255,7 +1438,6 @@ local function GatherGuis()
     end
     return l
 end
-
 local function WipeVisuals()
     savedGuiStates = {}
     for _, g in ipairs(GatherGuis()) do
@@ -1275,7 +1457,6 @@ local function WipeVisuals()
         end
     end
 end
-
 local function RestoreVisuals()
     for g, w in pairs(savedGuiStates) do
         if g and g.Parent then pcall(function() g.Enabled = w end) end
@@ -1297,7 +1478,6 @@ local function RestoreVisuals()
         pcall(function() o.Visible = S.HitboxShow end)
     end
 end
-
 UserInputServiceRef.InputBegan:Connect(function(i, p)
     if p then return end
     if i.KeyCode == Enum.KeyCode.J then

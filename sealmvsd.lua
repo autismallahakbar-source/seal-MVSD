@@ -81,6 +81,28 @@ _G.SealDevV27Loaded = true
 for i = 0, 26 do _G["SealDevV" .. i .. "Loaded"] = nil end
 _G.SealDevLoaded = nil
 
+pcall(function()
+    if getgenv().SealDevAntiLagOff then
+        pcall(getgenv().SealDevAntiLagOff)
+        getgenv().SealDevAntiLagOff = nil
+    end
+end)
+
+pcall(function()
+    local cg = game:GetService("CoreGui")
+    for _, ch in ipairs(cg:GetChildren()) do
+        if ch.Name == "SealDevConfigs" or ch.Name:find("SealDevConfig") then
+            pcall(function() ch:Destroy() end)
+        end
+    end
+    local plr = game:GetService("Players").LocalPlayer
+    for _, ch in ipairs(plr:GetChildren()) do
+        if ch.Name == "SealDevConfigs" or ch.Name:find("SealDevConfig") then
+            pcall(function() ch:Destroy() end)
+        end
+    end
+end)
+
 local LOGO = "rbxassetid://131261307870420"
 local DISCORD_LINK = "https://discord.gg/xhn6WaHzs5"
 
@@ -1408,6 +1430,7 @@ AimbotPage:Slider({
 })
 
 local MiscPage = Hub:Tab({ Title = "Misc", Icon = "wrench", Locked = false })
+
 MiscPage:Toggle({
     Title = "Flags", Desc = "Kill Effect Speed x4.5 + custom jump sound", Default = false,
     Callback = function(v)
@@ -1416,6 +1439,7 @@ MiscPage:Toggle({
         else flagsStop(); Notify("Flags OFF") end
     end,
 })
+
 MiscPage:Toggle({
     Title = "Anti-Exploiter",
     Desc = "Random position shifts to break enemy hit-reg (match only)",
@@ -1425,11 +1449,105 @@ MiscPage:Toggle({
         Notify(v and "Anti-Exploiter ON" or "Anti-Exploiter OFF")
     end,
 })
+
 MiscPage:Slider({
     Title = "Anti-Exploiter Force (studs)", Step = 0.5,
     Value = { Min = 1, Max = 8, Default = 3 },
     Callback = function(v) S.AntiExploiterForce = v end,
 })
+
+local antiLagConnection = nil
+local antiLagActive = false
+
+local function antiLagProcess(obj)
+    if not antiLagActive then return end
+    if not obj or not obj.Parent then return end
+
+    if obj:IsA("BasePart") and not obj.Anchored then
+        local model = obj:FindFirstAncestorOfClass("Model")
+        if not (model and model:FindFirstChildOfClass("Humanoid")) then
+            local name = string.lower(obj.Name)
+            if name:find("knife") or name:find("projectile") or name:find("throw") or
+               name:find("bullet") or name:find("dagger") or name:find("blade") then
+                pcall(function() obj:Destroy() end)
+                return
+            end
+        end
+    end
+
+    if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or
+       obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+        pcall(function() obj.Enabled = false end)
+    end
+
+    if obj:IsA("Sound") then
+        local name = string.lower(obj.Name)
+        if name:find("knife") or name:find("throw") or name:find("slash") or
+           name:find("shot") or name:find("gun") or name:find("stab") then
+            pcall(function() obj.Volume = 0 end)
+        end
+    end
+
+    if obj:IsA("BasePart") then
+        pcall(function()
+            obj.CastShadow = false
+            obj.Material = Enum.Material.SmoothPlastic
+            obj.Reflectance = 0
+        end)
+    end
+end
+
+local function antiLagOn()
+    if antiLagActive then return end
+    antiLagActive = true
+    if antiLagConnection then
+        pcall(function() antiLagConnection:Disconnect() end)
+    end
+    antiLagConnection = workspace.DescendantAdded:Connect(function(obj)
+        task.defer(function() antiLagProcess(obj) end)
+    end)
+    task.spawn(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            antiLagProcess(obj)
+        end
+    end)
+end
+
+local function antiLagOff()
+    antiLagActive = false
+    if antiLagConnection then
+        pcall(function() antiLagConnection:Disconnect() end)
+        antiLagConnection = nil
+    end
+end
+
+pcall(function()
+    getgenv().SealDevAntiLagOff = antiLagOff
+end)
+
+local antiLagToggle = MiscPage:Toggle({
+    Title = "Anti-Lag",
+    Default = false,
+    Callback = function(v)
+        if v then
+            antiLagOn()
+            Notify("Anti-Lag ON")
+        else
+            antiLagOff()
+            Notify("Anti-Lag OFF")
+        end
+    end,
+})
+
+task.spawn(function()
+    task.wait(1.5)
+    pcall(function()
+        if antiLagToggle and typeof(antiLagToggle) == "table" and antiLagToggle.Set then
+            antiLagToggle:Set(false)
+        end
+    end)
+    antiLagOff()
+end)
 
 local savedGuiStates = {}
 local function GatherGuis()
@@ -1492,6 +1610,7 @@ pcall(function()
     Hub:OnDestroy(function()
         _G.SealDevV27Loaded = nil
         pcall(function() RunServiceRef:UnbindFromRenderStep(flickBindName) end)
+        pcall(function() antiLagOff() end)
     end)
 end)
 

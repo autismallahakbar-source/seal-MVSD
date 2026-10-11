@@ -1458,42 +1458,240 @@ MiscPage:Slider({
 
 local antiLagConnection = nil
 local antiLagActive = false
+local antiLagSeen = setmetatable({}, { __mode = "k" })
+local antiLagTracked = setmetatable({}, { __mode = "k" })
+
+local SHOT_NAME_HINTS = {
+    "muzzle", "flash", "shot", "fire", "gun", "bullet", "impact",
+    "hit", "spark", "shell", "casing", "trail", "beam", "tracer"
+}
+
+local KNIFE_NAME_HINTS = {
+    "knife", "dagger", "blade", "thrown", "throw", "projectile",
+    "cleaver", "tomahawk", "shuriken", "kunai", "shank"
+}
+
+local function nameHasHint(n, hints)
+    for i = 1, #hints do
+        if string.find(n, hints[i], 1, true) then return true end
+    end
+    return false
+end
+
+local function isShotEffect(obj)
+    if not obj then return false end
+    if obj:GetAttribute("IsBullet") == true
+       or obj:GetAttribute("BulletOwner") ~= nil
+       or obj:GetAttribute("ShotBy") ~= nil then
+        return true
+    end
+    local n = string.lower(obj.Name)
+    if nameHasHint(n, SHOT_NAME_HINTS) then return true end
+    local p = obj.Parent
+    if p then
+        local pn = string.lower(p.Name)
+        if nameHasHint(pn, SHOT_NAME_HINTS) then return true end
+        local pp = p.Parent
+        if pp then
+            local ppn = string.lower(pp.Name)
+            if nameHasHint(ppn, SHOT_NAME_HINTS) then return true end
+        end
+    end
+    return false
+end
+
+local function isInsideCharacterOrToolOrBackpack(obj)
+    if not obj then return false end
+    local p = obj
+    while p do
+        if p:IsA("Tool") then return true end
+        if p:IsA("Accessory") then return true end
+        if p:IsA("Model") and PlayersService:GetPlayerFromCharacter(p) then return true end
+        if p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") then return true end
+        if p == MyPlayer then return true end
+        p = p.Parent
+    end
+    return false
+end
+
+local function isCharacterPart(obj)
+    if not obj then return false end
+    if obj:IsA("Accessory") or obj:IsA("CharacterMesh") or obj:IsA("BodyColors")
+       or obj:IsA("Shirt") or obj:IsA("Pants") or obj:IsA("Decal")
+       or obj:IsA("Humanoid") or obj:IsA("Animator") then
+        return true
+    end
+    return false
+end
+
+local function hasKnifeAttribute(obj)
+    if not obj then return false end
+    if obj:GetAttribute("IsKnife") == true then return true end
+    if obj:GetAttribute("ProjectileOwner") ~= nil then return true end
+    if obj:GetAttribute("KnifeOwner") ~= nil then return true end
+    if obj:GetAttribute("ThrownBy") ~= nil then return true end
+    return false
+end
+
+local function hasKnifeName(obj)
+    if not obj then return false end
+    local n = string.lower(obj.Name)
+    return nameHasHint(n, KNIFE_NAME_HINTS)
+end
+
+local function isKnifeObject(obj)
+    if not obj then return false end
+    if not obj.Parent then return false end
+    if obj:IsA("Tool") then return false end
+    if isShotEffect(obj) then return false end
+    if isInsideCharacterOrToolOrBackpack(obj) then return false end
+    if isCharacterPart(obj) then return false end
+    if obj:IsA("Sound") or obj:IsA("Folder") or obj:IsA("Configuration")
+       or obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")
+       or obj:IsA("BindableEvent") or obj:IsA("BindableFunction")
+       or obj:IsA("Script") or obj:IsA("LocalScript") or obj:IsA("ModuleScript")
+       or obj:IsA("Attachment") or obj:IsA("Motor6D")
+       or obj:IsA("Weld") or obj:IsA("WeldConstraint") or obj:IsA("JointInstance") then
+        return false
+    end
+    if not (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("MeshPart")
+            or obj:IsA("UnionOperation") or obj:IsA("Part")) then
+        return false
+    end
+    if hasKnifeAttribute(obj) then return true end
+    if hasKnifeName(obj) then return true end
+    if obj:IsA("BasePart") then
+        local p = obj.Parent
+        if p and (p:IsA("Model") or p:IsA("Folder")) then
+            if hasKnifeName(p) then return true end
+            for _, c in ipairs(p:GetChildren()) do
+                if c:IsA("BasePart") and (string.lower(c.Name) == "handle") then return true end
+            end
+        end
+    end
+    if obj:IsA("Model") then
+        local pp = obj.PrimaryPart
+        if pp and hasKnifeName(pp) then return true end
+        for _, d in ipairs(obj:GetDescendants()) do
+            if d:IsA("BasePart") and hasKnifeName(d) then return true end
+        end
+    end
+    return false
+end
+
+local function hideKnifeVisual(obj)
+    if not obj or not obj.Parent then return end
+    if obj:IsA("BasePart") or obj:IsA("MeshPart") or obj:IsA("UnionOperation") then
+        pcall(function()
+            obj.LocalTransparencyModifier = 1
+            obj.Transparency = 1
+            obj.CanCollide = false
+            obj.CanTouch = false
+            obj.CanQuery = false
+            obj.CastShadow = false
+        end)
+        for _, c in ipairs(obj:GetChildren()) do
+            if c:IsA("Decal") or c:IsA("Texture") then
+                pcall(function() c.Transparency = 1 end)
+            end
+            if c:IsA("ParticleEmitter") or c:IsA("Trail") or c:IsA("Beam") then
+                pcall(function() c.Enabled = false end)
+            end
+            if c:IsA("SpecialMesh") then
+                pcall(function() c.Transparency = 1 end)
+            end
+        end
+    elseif obj:IsA("Model") then
+        for _, d in ipairs(obj:GetDescendants()) do
+            if d:IsA("BasePart") or d:IsA("MeshPart") or d:IsA("UnionOperation") then
+                pcall(function()
+                    d.LocalTransparencyModifier = 1
+                    d.Transparency = 1
+                    d.CanCollide = false
+                    d.CanTouch = false
+                    d.CanQuery = false
+                    d.CastShadow = false
+                end)
+            elseif d:IsA("Decal") or d:IsA("Texture") then
+                pcall(function() d.Transparency = 1 end)
+            elseif d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") then
+                pcall(function() d.Enabled = false end)
+            elseif d:IsA("SpecialMesh") then
+                pcall(function() d.Transparency = 1 end)
+            end
+        end
+    end
+end
+
+local function trackKnife(obj)
+    if antiLagTracked[obj] then return end
+    antiLagTracked[obj] = true
+    task.spawn(function()
+        while antiLagActive and obj and obj.Parent do
+            hideKnifeVisual(obj)
+            task.wait(0.05)
+        end
+        antiLagTracked[obj] = nil
+    end)
+end
 
 local function antiLagProcess(obj)
     if not antiLagActive then return end
     if not obj or not obj.Parent then return end
+    if antiLagSeen[obj] then return end
+    antiLagSeen[obj] = true
 
-    if obj:IsA("BasePart") and not obj.Anchored then
-        local model = obj:FindFirstAncestorOfClass("Model")
-        if not (model and model:FindFirstChildOfClass("Humanoid")) then
-            local name = string.lower(obj.Name)
-            if name:find("knife") or name:find("projectile") or name:find("throw") or
-               name:find("bullet") or name:find("dagger") or name:find("blade") then
-                pcall(function() obj:Destroy() end)
-                return
+    if isShotEffect(obj) then return end
+    if isInsideCharacterOrToolOrBackpack(obj) then return end
+    if isCharacterPart(obj) then return end
+
+    if isKnifeObject(obj) then
+        hideKnifeVisual(obj)
+        trackKnife(obj)
+        return
+    end
+
+    if obj:IsA("BasePart") then
+        local p = obj.Parent
+        if p and not (p:IsA("Model") and (p:FindFirstChildOfClass("Humanoid") or PlayersService:GetPlayerFromCharacter(p))) then
+            if not isInsideCharacterOrToolOrBackpack(p) then
+                if (string.lower(obj.Name) == "handle") then
+                    local model = obj:FindFirstAncestorOfClass("Model")
+                    if model and not (model:FindFirstChildOfClass("Humanoid") or PlayersService:GetPlayerFromCharacter(model)) then
+                        hideKnifeVisual(model)
+                        trackKnife(model)
+                        return
+                    end
+                end
             end
         end
     end
 
     if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or
        obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+        if isShotEffect(obj) then return end
         pcall(function() obj.Enabled = false end)
+        return
     end
 
     if obj:IsA("Sound") then
-        local name = string.lower(obj.Name)
-        if name:find("knife") or name:find("throw") or name:find("slash") or
-           name:find("shot") or name:find("gun") or name:find("stab") then
+        local n = string.lower(obj.Name)
+        if nameHasHint(n, {"shot", "gun", "bullet", "muzzle"}) then return end
+        if nameHasHint(n, {"knife", "throw", "slash", "stab", "dagger", "blade"}) then
             pcall(function() obj.Volume = 0 end)
         end
+        return
     end
 
     if obj:IsA("BasePart") then
-        pcall(function()
-            obj.CastShadow = false
-            obj.Material = Enum.Material.SmoothPlastic
-            obj.Reflectance = 0
-        end)
+        local model = obj:FindFirstAncestorOfClass("Model")
+        if not (model and (model:FindFirstChildOfClass("Humanoid") or PlayersService:GetPlayerFromCharacter(model))) then
+            pcall(function()
+                obj.CastShadow = false
+                obj.Material = Enum.Material.SmoothPlastic
+                obj.Reflectance = 0
+            end)
+        end
     end
 end
 
@@ -1504,11 +1702,28 @@ local function antiLagOn()
         pcall(function() antiLagConnection:Disconnect() end)
     end
     antiLagConnection = workspace.DescendantAdded:Connect(function(obj)
-        task.defer(function() antiLagProcess(obj) end)
+        if obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("MeshPart")
+           or obj:IsA("UnionOperation") or obj:IsA("ParticleEmitter")
+           or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Sound")
+           or obj:IsA("Decal") or obj:IsA("Texture") or obj:IsA("SpecialMesh") then
+            task.defer(function() antiLagProcess(obj) end)
+        end
     end)
     task.spawn(function()
         for _, obj in ipairs(workspace:GetDescendants()) do
+            if not antiLagActive then return end
             antiLagProcess(obj)
+        end
+    end)
+    task.spawn(function()
+        while antiLagActive do
+            task.wait(1)
+            for _, obj in ipairs(workspace:GetChildren()) do
+                if not antiLagActive then return end
+                if obj:IsA("BasePart") or obj:IsA("Model") then
+                    antiLagProcess(obj)
+                end
+            end
         end
     end)
 end
@@ -1519,6 +1734,8 @@ local function antiLagOff()
         pcall(function() antiLagConnection:Disconnect() end)
         antiLagConnection = nil
     end
+    antiLagSeen = setmetatable({}, { __mode = "k" })
+    antiLagTracked = setmetatable({}, { __mode = "k" })
 end
 
 pcall(function()

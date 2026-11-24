@@ -105,7 +105,6 @@ do
     logoFrame.Parent = loadingGui
 
     local TEXT_SIZE = 120
-    local BOX_PADDING_X = 22
     local BOX_PADDING_Y = 8
     local BOX_HEIGHT = TEXT_SIZE + BOX_PADDING_Y * 2
 
@@ -310,17 +309,16 @@ local WorkspaceService    = game:GetService("Workspace")
 local RunServiceRef       = game:GetService("RunService")
 local UserInputServiceRef = game:GetService("UserInputService")
 local VirtualUserService  = game:GetService("VirtualUser")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 local CoreGuiRef          = game:GetService("CoreGui")
 local TweenServiceRef     = game:GetService("TweenService")
 local DebrisService       = game:GetService("Debris")
+local CollectionServiceRef = game:GetService("CollectionService")
 local MyPlayer            = PlayersService.LocalPlayer
 
 local DANCE_R15 = "rbxassetid://507776879"
 local DANCE_R6  = "rbxassetid://182435998"
 local FLAGS_MULTIPLIER = 4.5
 local JUMP_SOUND_NEW   = "rbxassetid://2428506580"
-
 local DEFAULT_WALKSPEED = 32
 
 local S = {
@@ -334,26 +332,17 @@ local S = {
     FlagsOn = false, FarmOn = false, FarmWalkSpeed = 40, LastDance = 0,
     DanceTrack = nil, DanceAnimObj = nil,
     AntiExploiterOn = false, AntiExploiterForce = 3,
-    FlickOn = false, FlickSmoothness = 0.9, FlickLastShot = 0, FlickShotCD = 0.7,
-    TriggerOn = false, TriggerCD = 0.03, TriggerLastShot = 0,
+    TriggerOn = false, TriggerCD = 1, TriggerFiring = false,
     AimbotOn = false, AimbotFOV = 200, AimbotShowFOV = false,
     AimbotSmoothness = 0.35,
-    FarmRoundStart = 0,
-    FarmLastMatchState = false,
-    FarmTeleported = false,
-    CachedKnife = nil,
+    FarmRoundStart = 0, FarmLastMatchState = false, FarmTeleported = false, CachedKnife = nil,
 }
 
 local AnchorRelease = false
 
 local SavedState = {
-    WalkSpeed = nil,
-    JumpPower = nil,
-    JumpHeight = nil,
-    AutoRotate = nil,
-    DefaultWalkSpeed = DEFAULT_WALKSPEED,
-    DefaultJumpPower = 50,
-    DefaultJumpHeight = 7.2,
+    WalkSpeed = nil, JumpPower = nil, JumpHeight = nil, AutoRotate = nil,
+    DefaultWalkSpeed = DEFAULT_WALKSPEED, DefaultJumpPower = 50, DefaultJumpHeight = 7.2,
 }
 
 local function dbg(m) warn("[SealDev] " .. tostring(m)) end
@@ -416,6 +405,18 @@ local function FindGun()
     return nil
 end
 
+-- [НОВОЕ] Только пушка В РУКАХ (Character, НЕ Backpack)
+local function getEquippedGun()
+    local char = MyPlayer.Character
+    if not char then return nil end
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") and t:FindFirstChild("Fire") and t:FindFirstChild("Reload") then
+            return t
+        end
+    end
+    return nil
+end
+
 local function EquipTool(t)
     if not t then return end
     local b = MyPlayer.Character
@@ -433,7 +434,6 @@ local function equipGun()
 end
 
 local RemoteFolder = RS:WaitForChild("Remotes", 10)
-
 local BulletRendererColor = Color3.fromRGB(255, 255, 255)
 
 local function BulletRenderer(origin, targetPos)
@@ -515,6 +515,9 @@ local function isTeammate(other)
     return false
 end
 
+-- ============================================================
+-- FOV
+-- ============================================================
 local fovGui = Instance.new("ScreenGui")
 fovGui.Name = "SealDevFOV"
 fovGui.ResetOnSpawn = false
@@ -586,69 +589,121 @@ local aimbotConn = RunServiceRef.RenderStepped:Connect(function()
     cam.CFrame = cam.CFrame:Lerp(goal, S.AimbotSmoothness)
 end)
 
-local function isFirstPerson()
-    local cam = WorkspaceService.CurrentCamera
-    if not cam then return false end
+-- ============================================================
+-- TRIGGERBOT — теперь стреляет ТОЛЬКО когда пест в руках
+-- ============================================================
+local function getPlayerFromHit(inst)
+    local current = inst
+    while current and current ~= WorkspaceService do
+        if current:FindFirstChildOfClass("Humanoid") then
+            local plr = PlayersService:GetPlayerFromCharacter(current)
+            if plr then return plr, current end
+        end
+        current = current.Parent
+    end
+    return nil, nil
+end
+
+-- [ИЗМЕНЕНО] Не ищет пушку сам — принимает уже экипированную
+local function VexalShootGun(target, hitPart, gun)
     local myChar = MyPlayer.Character
     if not myChar then return false end
-    local head = myChar:FindFirstChild("Head")
-    if not head then return false end
-    return (cam.CFrame.Position - head.Position).Magnitude < 1.2
+    if not gun or not gun.Parent then return false end
+    if gun.Parent ~= myChar then return false end  -- страховка: пушка должна быть в руках
+
+    local origin = CharacterRayOrigin(myChar)
+    if not origin then return false end
+
+    if not hitPart or not hitPart:IsA("BasePart") then
+        hitPart = target.Character and (
+            target.Character:FindFirstChild("UpperTorso")
+            or target.Character:FindFirstChild("LowerTorso")
+            or target.Character:FindFirstChild("Torso")
+            or target.Character:FindFirstChild("Head")
+            or target.Character:FindFirstChild("HumanoidRootPart")
+        )
+    end
+    if not hitPart then return false end
+
+    local targetPos = hitPart.Position
+    local muzzle = gun:FindFirstChild("Muzzle", true)
+    local startPos = (muzzle and muzzle:IsA("BasePart") and muzzle.WorldPosition) or origin
+    pcall(BulletRenderer, startPos, targetPos)
+
+    local sg = RemoteFolder and RemoteFolder:FindFirstChild("ShootGun")
+    if sg then
+        local ok, err = pcall(function() sg:FireServer(origin, targetPos, hitPart, targetPos) end)
+        if not ok then warn("[SealDev TriggerBot] FireServer error:", err) end
+    end
+
+    local sound = gun:FindFirstChild("Fire")
+    if sound and sound:IsA("Sound") then
+        pcall(function() sound:Play() end)
+    end
+    return true
 end
 
-local function simulateMouseClick()
-    pcall(function()
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-        task.wait(0.01)
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-    end)
-    pcall(function()
-        VirtualUserService:CaptureController()
-        VirtualUserService:ClickButton1(Vector2.new())
-    end)
+local function vexal_triggerbot_valid_enemy(enemy, character)
+    if not enemy or enemy == MyPlayer then return false end
+    character = character or enemy.Character
+    if not character then return false end
+    if isTeammate(enemy) then return false end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+    if CollectionServiceRef:HasTag(character, "Invulnerable") then return false end
+    return true
 end
 
-local triggerBusy = false
-task.spawn(function()
-    while true do
-        task.wait(0.03)
-        if S.TriggerOn and not S.GuiHidden and S.InMatch and not triggerBusy then
-            if isFirstPerson() then
-                local now = tick()
-                if now - S.TriggerLastShot >= S.TriggerCD then
-                    local cam = WorkspaceService.CurrentCamera
-                    local myChar = MyPlayer.Character
-                    if cam and myChar then
-                        local myHead = myChar:FindFirstChild("Head")
-                        local tool = myChar:FindFirstChildOfClass("Tool")
-                        if myHead and tool and tool:FindFirstChild("Fire") and tool:FindFirstChild("Reload") then
-                            local mp = UserInputServiceRef:GetMouseLocation()
-                            local ray = cam:ViewportPointToRay(mp.X, mp.Y)
-                            local rp = RaycastParams.new()
-                            rp.FilterType = Enum.RaycastFilterType.Exclude
-                            rp.FilterDescendantsInstances = { myChar }
-                            rp.IgnoreWater = true
-                            local result = WorkspaceService:Raycast(ray.Origin, ray.Direction * 3000, rp)
-                            if result then
-                                local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
-                                if hitChar then
-                                    local hitPlayer = PlayersService:GetPlayerFromCharacter(hitChar)
-                                    if hitPlayer and hitPlayer ~= MyPlayer and not isTeammate(hitPlayer) then
-                                        local hp = hitChar:FindFirstChildOfClass("Humanoid")
-                                        if hp and hp.Health > 0 then
-                                            triggerBusy = true
-                                            simulateMouseClick()
-                                            S.TriggerLastShot = now
-                                            task.delay(0.02, function() triggerBusy = false end)
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
+local function vexal_triggerbot_shoot(target, targetChar, hitPart, gun)
+    local myChar = MyPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then S.TriggerFiring = false; return end
+
+    if not hitPart or not hitPart:IsA("BasePart") then
+        hitPart = targetChar:FindFirstChild("UpperTorso")
+            or targetChar:FindFirstChild("LowerTorso")
+            or targetChar:FindFirstChild("Torso")
+            or targetChar:FindFirstChild("Head")
+            or targetChar:FindFirstChild("HumanoidRootPart")
+    end
+    if not hitPart then S.TriggerFiring = false; return end
+
+    VexalShootGun(target, hitPart, gun)
+end
+
+local triggerbot_conn = RunServiceRef.Heartbeat:Connect(function()
+    if not S.TriggerOn then return end
+    if S.GuiHidden then return end
+    if not S.InMatch then return end
+    if S.TriggerFiring then return end
+
+    -- [НОВОЕ] Триггерится ТОЛЬКО когда пест в руках
+    local gun = getEquippedGun()
+    if not gun then return end
+
+    local character = MyPlayer.Character
+    if not character then return end
+    local cam = WorkspaceService.CurrentCamera
+    if not cam then return end
+
+    local mousePos = UserInputServiceRef:GetMouseLocation()
+    local ray = cam:ViewportPointToRay(mousePos.X, mousePos.Y)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = { character }
+    rayParams.IgnoreWater = true
+    local result = WorkspaceService:Raycast(ray.Origin, ray.Direction * 2000, rayParams)
+    if not result then return end
+
+    local hitPlayer, hitCharacter = getPlayerFromHit(result.Instance)
+    if not hitPlayer or not hitCharacter then return end
+
+    if vexal_triggerbot_valid_enemy(hitPlayer, hitCharacter) then
+        S.TriggerFiring = true
+        vexal_triggerbot_shoot(hitPlayer, hitCharacter, result.Instance, gun)
+        task.delay(math.max(S.TriggerCD, 0.01), function()
+            S.TriggerFiring = false
+        end)
     end
 end)
 
@@ -806,204 +861,6 @@ NameFolder.Name = "SealDevInfo"; NameFolder.Parent = CoreGuiRef
 
 local HitboxFolder = CoreGuiRef:FindFirstChild("SealDevHitbox") or Instance.new("Folder")
 HitboxFolder.Name = "SealDevHitbox"; HitboxFolder.Parent = CoreGuiRef
-
-local flickBindName = "SealDevFlick"
-pcall(function() RunServiceRef:UnbindFromRenderStep(flickBindName) end)
-
-local shiftlockFrames = 0
-local SHIFTLOCK_REQUIRED_FRAMES = 3
-local flickState = "idle"
-local flickOriginalCF = nil
-local flickOriginalHRP = nil
-local flickReturnProgress = 0
-local flickAimFrames = 0
-local flickOvershootTarget = nil
-local flickOvershootDone = false
-local flickWobblePhase = 0
-local flickWobbleSpeed = 0
-local flickWobbleAmp = 0
-
-local function checkShiftlockRaw()
-    local mb = UserInputServiceRef.MouseBehavior
-    local mouseLocked = (mb == Enum.MouseBehavior.LockCenter) or (mb == Enum.MouseBehavior.LockCurrentPosition)
-    if not mouseLocked then return false end
-    local cam = WorkspaceService.CurrentCamera
-    if not cam then return false end
-    local subject = cam.CameraSubject
-    if not subject then return false end
-    local myChar = MyPlayer.Character
-    if not myChar then return false end
-    local ok = subject == myChar or subject:IsDescendantOf(myChar) or subject.Parent == myChar
-    if not ok then return false end
-    if MyPlayer.DevEnableMouseLock == false then return false end
-    local m = UserInputServiceRef:GetMouseLocation()
-    local vp = cam.ViewportSize
-    local cx, cy = vp.X / 2, vp.Y / 2
-    if math.abs(m.X - cx) > 8 or math.abs(m.Y - cy) > 8 then return false end
-    return true
-end
-
-local function easeOutCubic(t)
-    t = math.clamp(t, 0, 1)
-    return 1 - (1 - t) ^ 3
-end
-
-local function humanLerp(fromCF, toCF, baseAlpha, wobblePhase, wobbleAmp)
-    local variance = 0.88 + math.random() * 0.24
-    local a = math.clamp(baseAlpha * variance, 0.03, 1)
-    local result = fromCF:Lerp(toCF, a)
-    local wx = math.sin(wobblePhase) * wobbleAmp
-    local wy = math.cos(wobblePhase * 1.3) * wobbleAmp * 0.7
-    wx = wx + (math.random() - 0.5) * wobbleAmp * 0.6
-    wy = wy + (math.random() - 0.5) * wobbleAmp * 0.6
-    return result * CFrame.Angles(wx, wy, 0)
-end
-
-RunServiceRef:BindToRenderStep(flickBindName, Enum.RenderPriority.Camera.Value + 1, function()
-    if not S.FlickOn or S.GuiHidden or not S.InMatch then
-        if flickState == "aiming" or flickState == "returning" then
-            local char = MyPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum then hum.AutoRotate = true end
-        end
-        shiftlockFrames = 0
-        flickState = "idle"
-        flickOriginalCF = nil
-        flickOriginalHRP = nil
-        flickReturnProgress = 0
-        flickAimFrames = 0
-        flickOvershootTarget = nil
-        flickOvershootDone = false
-        return
-    end
-    if checkShiftlockRaw() then
-        shiftlockFrames = math.min(shiftlockFrames + 1, SHIFTLOCK_REQUIRED_FRAMES)
-    else
-        shiftlockFrames = 0
-    end
-    local cam = WorkspaceService.CurrentCamera
-    if not cam then return end
-    local shiftlockOk = shiftlockFrames >= SHIFTLOCK_REQUIRED_FRAMES
-    local rmb = UserInputServiceRef:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-    local myChar = MyPlayer.Character
-    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
-    local myHead = myChar and myChar:FindFirstChild("Head")
-    local bestHead = nil
-    if shiftlockOk and rmb and myChar and myHRP and myHum and myHead then
-        local bestDist = math.huge
-        local camPos = cam.CFrame.Position
-        for _, other in ipairs(S.EnemyList) do
-            if not isTeammate(other) then
-                local char = other.Character
-                if char then
-                    local head = char:FindFirstChild("Head")
-                    local hp = char:FindFirstChildOfClass("Humanoid")
-                    if head and hp and hp.Health > 0 then
-                        local d = (head.Position - camPos).Magnitude
-                        if d < bestDist and hasClearLOS(myHead, char) then
-                            bestDist = d
-                            bestHead = head
-                        end
-                    end
-                end
-            end
-        end
-    end
-    if bestHead and shiftlockOk and rmb and myHRP and myHum and myHead then
-        if flickState ~= "aiming" then
-            if flickState == "idle" or not flickOriginalCF then
-                flickOriginalCF = cam.CFrame
-                flickOriginalHRP = myHRP.CFrame
-            end
-            flickAimFrames = 0
-            flickOvershootTarget = nil
-            flickOvershootDone = false
-            flickWobblePhase = math.random() * math.pi * 2
-            flickWobbleSpeed = 0.15 + math.random() * 0.15
-            flickWobbleAmp = 0.0015 + math.random() * 0.002
-            myHum.AutoRotate = false
-        end
-        flickState = "aiming"
-        flickAimFrames = flickAimFrames + 1
-        flickWobblePhase = flickWobblePhase + flickWobbleSpeed
-        local camPos = cam.CFrame.Position
-        local hrpPos = myHRP.Position
-        local targetPos = bestHead.Position
-        local distToTarget = (camPos - targetPos).Magnitude
-        if flickAimFrames <= 2 then
-            local flat = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
-            myHRP.CFrame = CFrame.lookAt(hrpPos, flat)
-            return
-        end
-        if not flickOvershootTarget and not flickOvershootDone then
-            if distToTarget > 30 then
-                local overAmount = 1 + (0.005 + math.random() * 0.01)
-                local dir = (targetPos - camPos)
-                flickOvershootTarget = CFrame.new(camPos, camPos + dir * overAmount)
-            else
-                flickOvershootDone = true
-            end
-        end
-        local targetCF
-        if flickOvershootTarget and not flickOvershootDone then
-            targetCF = flickOvershootTarget
-        else
-            targetCF = CFrame.new(camPos, targetPos)
-        end
-        local speedCurve
-        if flickAimFrames <= 12 then speedCurve = easeOutCubic(flickAimFrames / 12)
-        else speedCurve = 1 end
-        local alpha = S.FlickSmoothness * speedCurve
-        local currentWobble = flickWobbleAmp * (1 - math.min(flickAimFrames / 30, 0.8))
-        local flatTarget = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
-        local bodyGoalCF = CFrame.lookAt(hrpPos, flatTarget)
-        myHRP.CFrame = myHRP.CFrame:Lerp(bodyGoalCF, math.clamp(alpha * 1.4, 0, 1))
-        cam.CFrame = humanLerp(cam.CFrame, targetCF, alpha, flickWobblePhase, currentWobble)
-        if flickOvershootTarget and not flickOvershootDone then
-            local curLook = cam.CFrame.LookVector
-            local realDir = (targetPos - cam.CFrame.Position).Unit
-            if curLook:Dot(realDir) > 0.995 then flickOvershootDone = true end
-        end
-        local now = tick()
-        local jitterCD = S.FlickShotCD * (0.85 + math.random() * 0.3)
-        if now - S.FlickLastShot >= jitterCD then
-            local tool = myChar:FindFirstChildOfClass("Tool")
-            if tool and tool:FindFirstChild("Fire") and tool:FindFirstChild("Reload") then
-                local sg = RemoteFolder and RemoteFolder:FindFirstChild("ShootGun")
-                if sg then
-                    local origin = myHead.Position
-                    local offset = Vector3.new(
-                        (math.random() - 0.5) * 0.05,
-                        (math.random() - 0.5) * 0.05,
-                        (math.random() - 0.5) * 0.05
-                    )
-                    local shotPos = targetPos + offset
-                    pcall(function() sg:FireServer(origin, shotPos, bestHead, shotPos) end)
-                    S.FlickLastShot = now
-                end
-            end
-        end
-    elseif flickState == "aiming" then
-        flickState = "returning"
-        flickReturnProgress = 0
-        flickOriginalCF = flickOriginalCF or cam.CFrame
-        flickOriginalHRP = flickOriginalHRP or (myHRP and myHRP.CFrame)
-    end
-    if flickState == "returning" then
-        flickReturnProgress = math.min(flickReturnProgress + 0.07, 1)
-        local eased = easeOutCubic(flickReturnProgress)
-        if flickOriginalCF then cam.CFrame = cam.CFrame:Lerp(flickOriginalCF, eased) end
-        if flickOriginalHRP and myHRP then myHRP.CFrame = myHRP.CFrame:Lerp(flickOriginalHRP, eased) end
-        if flickReturnProgress >= 1 then
-            flickState = "idle"
-            flickOriginalCF = nil
-            flickOriginalHRP = nil
-            local hum = MyPlayer.Character and MyPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if hum then hum.AutoRotate = true end
-        end
-    end
-end)
 
 local boostedAnimators = setmetatable({}, { __mode = "k" })
 local boostedParticles = setmetatable({}, { __mode = "k" })
@@ -1184,6 +1041,9 @@ local function restoreAllHitboxes()
     for _, b in ipairs(HitboxFolder:GetChildren()) do pcall(function() b:Destroy() end) end
 end
 
+-- ============================================================
+-- UI: MAIN
+-- ============================================================
 local MainPage = Hub:Tab({ Title = "Main", Icon = "layout-dashboard", Locked = false })
 
 MainPage:Button({
@@ -1304,15 +1164,16 @@ task.spawn(function()
     end
 end)
 
+-- ============================================================
+-- KILL ALL
+-- ============================================================
 local KillPage = Hub:Tab({ Title = "Kill All", Icon = "skull", Locked = false })
-
 local GunSection = KillPage:Section({ Title = "Gun", Opened = true })
 
 local GUN_KILL_COOLDOWN = 0.06
 local GUN_KILL_INTERVAL = 0.015
-
 local gunKillOn = false
-lastGunShot = {}
+local lastGunShot = {}
 
 local function killAllWithGunOnce()
     if not S.InMatch then Notify("Not in match") return end
@@ -1395,6 +1256,118 @@ GunSection:Toggle({
     end,
 })
 
+-- ============================================================
+-- KILL MODE (стелс, только пест в руках)
+-- ============================================================
+local KillModeSection = KillPage:Section({ Title = "Kill Mode", Opened = true })
+
+local killModeOn = false
+local killModeCooldown = 0.05
+local killModeLastFire = {}
+
+local BODY_PRIORITY = {
+    Head = 1, UpperTorso = 2, Torso = 2, LowerTorso = 3,
+    HumanoidRootPart = 99,
+}
+
+local function getAllBodyParts(char)
+    local parts = {}
+    for _, p in ipairs(char:GetChildren()) do
+        if p:IsA("BasePart") then parts[#parts + 1] = p end
+    end
+    table.sort(parts, function(a, b)
+        return (BODY_PRIORITY[a.Name] or 10) < (BODY_PRIORITY[b.Name] or 10)
+    end)
+    return parts
+end
+
+local function losToPart(fromPos, targetChar, targetPart)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { MyPlayer.Character, targetChar }
+    params.IgnoreWater = true
+    local dir = targetPart.Position - fromPos
+    if dir.Magnitude < 0.1 then return true end
+    local res = WorkspaceService:Raycast(fromPos, dir, params)
+    return res == nil
+end
+
+local function findAnyVisiblePart(myChar, targetChar)
+    local myHead = myChar:FindFirstChild("Head")
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHead and not myHRP then return nil end
+    for _, part in ipairs(getAllBodyParts(targetChar)) do
+        if part and part.Parent then
+            if myHead and losToPart(myHead.Position, targetChar, part) then return part end
+            if myHRP and losToPart(myHRP.Position, targetChar, part) then return part end
+        end
+    end
+    return nil
+end
+
+KillModeSection:Toggle({
+    Title = "Kill Mode",
+    Desc = "Only fires when YOU hold the gun. Any visible body part — even a finger.",
+    Default = false,
+    Callback = function(v)
+        killModeOn = v
+        if v then
+            killModeLastFire = {}
+            if not getEquippedGun() then
+                Notify("Equip the gun in your hands first!")
+            end
+        end
+        Notify(v and "Kill Mode ON" or "Kill Mode OFF")
+    end,
+})
+
+KillModeSection:Slider({
+    Title = "Cooldown (s)", Step = 0.01,
+    Value = { Min = 0.01, Max = 1, Default = 0.05 },
+    Callback = function(v) killModeCooldown = v end,
+})
+
+task.spawn(function()
+    while true do
+        if killModeOn and S.InMatch and not S.GuiHidden then
+            local gun = getEquippedGun()
+            if gun then
+                local myChar = MyPlayer.Character
+                local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                if myHRP then
+                    for _, o in ipairs(S.EnemyList) do
+                        if not isTeammate(o) then
+                            local last = killModeLastFire[o] or 0
+                            if tick() - last >= killModeCooldown then
+                                local tChar = o.Character
+                                if tChar then
+                                    local tHum = tChar:FindFirstChildOfClass("Humanoid")
+                                    if tHum and tHum.Health > 0 and not CollectionServiceRef:HasTag(tChar, "Invulnerable") then
+                                        local part = findAnyVisiblePart(myChar, tChar)
+                                        if part then
+                                            local sg = RemoteFolder and RemoteFolder:FindFirstChild("ShootGun")
+                                            if sg then
+                                                pcall(function()
+                                                    sg:FireServer(myHRP.Position, part.Position, part, part.Position)
+                                                end)
+                                                killModeLastFire[o] = tick() + math.random() * 0.01
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.01)
+    end
+end)
+
+-- ============================================================
+-- FARM
+-- ============================================================
 local farmGroups = { DuelRing_1v1 = 1, DuelRing_2v2 = 2, DuelRing_3v3 = 3, DuelRing_4v4 = 4 }
 local farmLobby, lastJumpTime, currentFarmPad
 
@@ -1501,22 +1474,17 @@ task.spawn(function()
     while task.wait(0.01) do
         if S.FarmOn and not S.GuiHidden then
             local inMatchNow = S.InMatch
-
             if inMatchNow and not S.FarmLastMatchState then
                 S.FarmRoundStart = tick()
                 S.FarmTeleported = false
                 S.CachedKnife = nil
             end
             S.FarmLastMatchState = inMatchNow
-
             if inMatchNow then
                 currentFarmPad = nil
-
                 if tick() - S.LastDance >= 5 then
-                    playDance()
-                    S.LastDance = tick()
+                    playDance(); S.LastDance = tick()
                 end
-
                 if not S.FarmTeleported then
                     local hrp = MyPlayer.Character and MyPlayer.Character:FindFirstChild("HumanoidRootPart")
                     if hrp then
@@ -1534,7 +1502,6 @@ task.spawn(function()
                     end
                     S.FarmTeleported = true
                 end
-
                 if not S.CachedKnife or not S.CachedKnife.Parent then
                     S.CachedKnife = FindKnife()
                 end
@@ -1549,9 +1516,7 @@ task.spawn(function()
                                 if target then
                                     local knifeRemote = RemoteFolder and RemoteFolder:FindFirstChild("ThrowHit")
                                     if knifeRemote then
-                                        pcall(function()
-                                            knifeRemote:FireServer(target, target.Position)
-                                        end)
+                                        pcall(function() knifeRemote:FireServer(target, target.Position) end)
                                     end
                                 end
                             end
@@ -1560,9 +1525,7 @@ task.spawn(function()
                 end
             else
                 if S.DanceTrack then stopDance() end
-                if not currentFarmPad or not currentFarmPad.Parent then
-                    currentFarmPad = farmFindPad()
-                end
+                if not currentFarmPad or not currentFarmPad.Parent then currentFarmPad = farmFindPad() end
                 if currentFarmPad then farmWalkTo(currentFarmPad) end
             end
         end
@@ -1577,6 +1540,9 @@ task.spawn(function()
     end
 end)
 
+-- ============================================================
+-- ESP
+-- ============================================================
 local EspPage = Hub:Tab({ Title = "ESP", Icon = "eye", Locked = false })
 EspPage:Toggle({
     Title = "Chams", Default = false,
@@ -1709,6 +1675,9 @@ EspPage:Colorpicker({
     Callback = function(c) S.FoeColor = c end,
 })
 
+-- ============================================================
+-- MOVEMENT
+-- ============================================================
 local noclipConn = nil
 local noclipOriginalCollide = {}
 
@@ -1725,9 +1694,7 @@ MovePage:Toggle({
                 if b then
                     for _, p in ipairs(b:GetDescendants()) do
                         if p:IsA("BasePart") then
-                            if noclipOriginalCollide[p] == nil then
-                                noclipOriginalCollide[p] = p.CanCollide
-                            end
+                            if noclipOriginalCollide[p] == nil then noclipOriginalCollide[p] = p.CanCollide end
                             p.CanCollide = false
                         end
                     end
@@ -1736,17 +1703,13 @@ MovePage:Toggle({
         else
             if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
             for part, val in pairs(noclipOriginalCollide) do
-                if part and part.Parent then
-                    pcall(function() part.CanCollide = val end)
-                end
+                if part and part.Parent then pcall(function() part.CanCollide = val end) end
             end
             noclipOriginalCollide = {}
             local b = MyPlayer.Character
             if b then
                 for _, p in ipairs(b:GetDescendants()) do
-                    if p:IsA("BasePart") then
-                        pcall(function() p.CanCollide = true end)
-                    end
+                    if p:IsA("BasePart") then pcall(function() p.CanCollide = true end) end
                 end
             end
         end
@@ -1768,9 +1731,7 @@ MovePage:Toggle({
             end)
         else
             local h = MyPlayer.Character and MyPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if h then
-                h.WalkSpeed = SavedState.WalkSpeed or DEFAULT_WALKSPEED
-            end
+            if h then h.WalkSpeed = SavedState.WalkSpeed or DEFAULT_WALKSPEED end
         end
     end,
 })
@@ -1787,34 +1748,9 @@ MovePage:Slider({
     end,
 })
 
-local FlickPage = Hub:Tab({ Title = "Flick", Icon = "crosshair", Locked = false })
-FlickPage:Toggle({
-    Title = "Flick Mode",
-    Desc = "Shiftlock + RMB → full body + camera flick + auto-shoot",
-    Default = false,
-    Callback = function(v)
-        S.FlickOn = v
-        if not v then
-            flickState = "idle"
-            flickOriginalCF = nil
-            flickOriginalHRP = nil
-            flickReturnProgress = 0
-            flickAimFrames = 0
-            flickOvershootTarget = nil
-            flickOvershootDone = false
-            shiftlockFrames = 0
-            local hum = MyPlayer.Character and MyPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if hum then hum.AutoRotate = true end
-        end
-        Notify(v and "Flick Mode ON" or "Flick Mode OFF")
-    end,
-})
-FlickPage:Slider({
-    Title = "Flick Smoothness", Step = 0.05,
-    Value = { Min = 0.1, Max = 1, Default = 0.9 },
-    Callback = function(v) S.FlickSmoothness = v end,
-})
-
+-- ============================================================
+-- AIMBOT + TRIGGERBOT UI
+-- ============================================================
 local AimbotPage = Hub:Tab({ Title = "Aimbot", Icon = "crosshair", Locked = false })
 
 AimbotPage:Section({ Title = "Aimbot" })
@@ -1831,10 +1767,7 @@ AimbotPage:Toggle({
 AimbotPage:Slider({
     Title = "Aimbot FOV", Step = 1,
     Value = { Min = 65, Max = 1000, Default = 200 },
-    Callback = function(v)
-        S.AimbotFOV = v
-        updateFovCircle()
-    end,
+    Callback = function(v) S.AimbotFOV = v; updateFovCircle() end,
 })
 AimbotPage:Slider({
     Title = "Aimbot Smoothness", Step = 0.01,
@@ -1844,28 +1777,31 @@ AimbotPage:Slider({
 AimbotPage:Toggle({
     Title = "Show FOV Circle",
     Default = false,
-    Callback = function(v)
-        S.AimbotShowFOV = v
-        updateFovCircle()
-    end,
+    Callback = function(v) S.AimbotShowFOV = v; updateFovCircle() end,
 })
 
 AimbotPage:Section({ Title = "TriggerBot" })
 AimbotPage:Toggle({
     Title = "TriggerBot",
-    Desc = "First-person only. Simulates real mouse click when crosshair is on enemy",
+    Desc = "Only works when YOU hold the gun. Shoots any part of an enemy.",
     Default = false,
     Callback = function(v)
         S.TriggerOn = v
-        Notify(v and "TriggerBot ON (first-person)" or "TriggerBot OFF")
+        if v and not getEquippedGun() then
+            Notify("Equip the gun in your hands first!")
+        end
+        Notify(v and "TriggerBot ON" or "TriggerBot OFF")
     end,
 })
 AimbotPage:Slider({
-    Title = "TriggerBot Cooldown", Step = 0.005,
-    Value = { Min = 0.01, Max = 0.5, Default = 0.03 },
+    Title = "TriggerBot Cooldown", Step = 0.1,
+    Value = { Min = 0, Max = 3, Default = 1 },
     Callback = function(v) S.TriggerCD = v end,
 })
 
+-- ============================================================
+-- MISC
+-- ============================================================
 local MiscPage = Hub:Tab({ Title = "Misc", Icon = "wrench", Locked = false })
 
 MiscPage:Toggle({
@@ -1893,6 +1829,7 @@ MiscPage:Slider({
     Callback = function(v) S.AntiExploiterForce = v end,
 })
 
+-- Anti-Lag
 local antiLagConnection = nil
 local antiLagActive = false
 local antiLagProcessed = setmetatable({}, { __mode = "k" })
@@ -1966,31 +1903,23 @@ local function processOne(obj)
     if not obj or not obj.Parent then return end
     if antiLagProcessed[obj] then return end
     antiLagProcessed[obj] = true
-
     if isMine(obj) then return end
     if isGunSoundOrEffect(obj) then return end
-
     if isKnife(obj) then
-        if not isMine(obj) then
-            pcall(function() obj:Destroy() end)
-        end
+        if not isMine(obj) then pcall(function() obj:Destroy() end) end
         return
     end
-
     if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
         or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
         pcall(function() obj.Enabled = false end)
         return
     end
-
     if obj:IsA("BasePart") then
         local model = obj:FindFirstAncestorOfClass("Model")
         if not (model and model:FindFirstChildOfClass("Humanoid")) then
             pcall(function()
                 if obj.CastShadow then obj.CastShadow = false end
-                if obj.Material ~= Enum.Material.SmoothPlastic then
-                    obj.Material = Enum.Material.SmoothPlastic
-                end
+                if obj.Material ~= Enum.Material.SmoothPlastic then obj.Material = Enum.Material.SmoothPlastic end
                 if obj.Reflectance > 0 then obj.Reflectance = 0 end
             end)
         end
@@ -2000,16 +1929,11 @@ end
 local function antiLagOn()
     if antiLagActive then return end
     antiLagActive = true
-
-    if antiLagConnection then
-        pcall(function() antiLagConnection:Disconnect() end)
-    end
-
+    if antiLagConnection then pcall(function() antiLagConnection:Disconnect() end) end
     antiLagConnection = WorkspaceService.DescendantAdded:Connect(function(obj)
         if not antiLagActive then return end
         task.defer(function() processOne(obj) end)
     end)
-
     task.spawn(function()
         task.wait(0.5)
         if not antiLagActive then return end
@@ -2041,13 +1965,8 @@ local antiLagToggle = MiscPage:Toggle({
     Desc = "Blocks enemy lag/crash. Your gun & knife effects stay visible.",
     Default = false,
     Callback = function(v)
-        if v then
-            antiLagOn()
-            Notify("Anti-Lag ON")
-        else
-            antiLagOff()
-            Notify("Anti-Lag OFF")
-        end
+        if v then antiLagOn(); Notify("Anti-Lag ON")
+        else antiLagOff(); Notify("Anti-Lag OFF") end
     end,
 })
 
@@ -2061,6 +1980,9 @@ task.spawn(function()
     antiLagOff()
 end)
 
+-- ============================================================
+-- HIDE GUI (J)
+-- ============================================================
 local savedGuiStates = {}
 local function GatherGuis()
     local l = {}
@@ -2118,14 +2040,17 @@ UserInputServiceRef.InputBegan:Connect(function(i, p)
     end
 end)
 
+-- ============================================================
+-- DESTROY
+-- ============================================================
 pcall(function()
     Hub:OnDestroy(function()
         _G.SealDevV27Loaded = nil
         gunKillOn = false
+        killModeOn = false
         S.FarmOn = false
         S.SpeedOn = false
         S.NoclipOn = false
-        S.FlickOn = false
         S.FlagsOn = false
         S.AimbotOn = false
         S.TriggerOn = false
@@ -2136,7 +2061,6 @@ pcall(function()
         S.TracerESP = false
         S.NameESP = false
         AnchorRelease = false
-        pcall(function() RunServiceRef:UnbindFromRenderStep(flickBindName) end)
         pcall(function() antiLagOff() end)
         pcall(function() farmDisable() end)
         pcall(function() restoreAllHitboxes() end)
@@ -2155,6 +2079,7 @@ pcall(function()
         pcall(function() if TracerConn then TracerConn:Disconnect() end end)
         pcall(function() if aimbotConn then aimbotConn:Disconnect() end end)
         pcall(function() if antiAfkConn then antiAfkConn:Disconnect() end end)
+        pcall(function() if triggerbot_conn then triggerbot_conn:Disconnect() end end)
         pcall(function() stopDance() end)
         pcall(function() fovGui:Destroy() end)
     end)
